@@ -6,7 +6,7 @@ import qualified Data.ByteString      as BS
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Either          (isRight)
 import           Data.Foldable        (traverse_)
-import           System.Directory     (doesDirectoryExist, listDirectory, withCurrentDirectory)
+import           System.Directory     (doesDirectoryExist, doesPathExist, listDirectory, withCurrentDirectory)
 import           System.FilePath      ((</>))
 import           System.IO.Temp       (withSystemTempDirectory)
 import           Data.List            (intersperse, sort, sortOn)
@@ -62,6 +62,16 @@ itPacksUnpacksViaFS entries = unpackedFromFS $ it "packs/unpacks on filesystem s
 
                 action unpacked
 
+itContainsFile :: HasCallStack => FilePath -> SpecWith (Either ArchiveResult FilePath)
+itContainsFile target = do
+    it ("should contain " ++ target) $ \(Right dir) ->
+        doesPathExist (dir </> target) `shouldReturn` True
+
+itContainsEntryFor :: HasCallStack => FilePath -> SpecWith (Either ArchiveResult [Entry])
+itContainsEntryFor target = do
+    it ("should contain entry for " ++ target) $ \(Right entries) ->
+        map filepath entries `shouldContain` [target]
+
 testFp :: HasCallStack => FilePath -> Spec
 testFp fp = parallel $ it ("sucessfully unpacks/packs (" ++ fp ++ ")") $
     roundtrip fp >>= (`shouldSatisfy` isRight)
@@ -70,7 +80,7 @@ main :: IO ()
 main = do
     dir <- doesDirectoryExist "test/data"
     tarballs <- if dir then listDirectory "test/data" else pure []
-    hspec $
+    hspec $ do
         describe "roundtrip" $ do
             traverse_ testFp (("test/data" </>) <$> tarballs)
             context "with symlinks" $ do
@@ -104,6 +114,28 @@ main = do
                 [ stripOwnership (simpleFile "a.txt" (NormalFile "text")) ]
             xcontext "having entry without timestamp" . itPacksUnpacks $
                 [ stripTime (simpleFile "a.txt" (NormalFile "text")) ]
+
+        describe "archive samples" $ do
+            context "hard-links" . before (pure "test/data/hard-links-bsd.tar") $ do
+                context "via readArchiveFile" $
+                    beforeWith (runArchiveM . readArchiveFile) $ do
+                        it "should succeed" $ \result ->
+                            const () <$> result `shouldBe` Right ()
+
+                        itContainsEntryFor "hard-links/a.txt"
+                        itContainsEntryFor "hard-links/b.txt"
+
+                xcontext "via unpackArchive (issue#4)" $
+                    aroundWith (tempUnpack unpackArchive) $ do
+                        it "should succeed" $ \result ->
+                            const () <$> result `shouldBe` Right ()
+
+                        itContainsFile "hard-links/a.txt"
+                        itContainsFile "hard-links/b.txt"
+
+tempUnpack how test what = withSystemTempDirectory "spec-" $ \dest -> do
+    result <- runArchiveM (how what dest >> pure dest)
+    test result
 
 simpleFile :: FilePath -> EntryContent -> Entry
 simpleFile name what = Entry name what standardPermissions (Ownership (Just "root") (Just "root")  0 0) (Just (0,0))
