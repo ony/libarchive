@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 module Codec.Archive.Unpack ( hsEntries
                             , unpackEntriesFp
                             , unpackArchive
@@ -96,15 +97,25 @@ unpackEntriesFp a fp = do
     case res of
         Nothing -> pure ()
         Just x  -> do
-            preFile <- liftIO $ archiveEntryPathname x
-            file <- liftIO $ peekCString preFile
-            let file' = fp </> file
-            liftIO $ withCString file' $ \fileC ->
-                archiveEntrySetPathname x fileC
-            ignore $ archiveReadExtract a x archiveExtractTime
-            liftIO $ archiveEntrySetPathname x preFile
+            ignore . withPrefix fp x $ archiveReadExtract a x archiveExtractTime
             ignore $ archiveReadDataSkip a
             unpackEntriesFp a fp
+
+-- TODO: work with libarchive to get rid of this unsafe hack
+-- See https://github.com/libarchive/libarchive/issues/1203
+withPrefix :: FilePath -> ArchiveEntryPtr -> IO a -> IO a
+withPrefix fp x inner = do
+    file0 <- peekCString =<< archiveEntryPathname x
+    withCString (fp </> file0) $ archiveEntrySetPathname x
+    result <- archiveEntryFiletype x >>= \case
+        Nothing -> archiveEntryHardlink x >>= peekCString >>= \target0 -> do
+            withCString (fp </> target0) $ archiveEntrySetHardlink x
+            result <- inner
+            withCString target0 $ archiveEntrySetHardlink x
+            return result
+        _ -> inner
+    withCString file0 $ archiveEntrySetPathname x
+    return result
 
 readBS :: Ptr Archive -> Int -> IO BS.ByteString
 readBS a sz =
